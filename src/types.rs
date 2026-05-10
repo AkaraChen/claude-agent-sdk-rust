@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -78,6 +79,50 @@ pub struct TaskBudget {
     pub total: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EffortLevel {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum AgentEffort {
+    Level(EffortLevel),
+    Tokens(i64),
+}
+
+impl AgentEffort {
+    pub fn level(level: EffortLevel) -> Self {
+        Self::Level(level)
+    }
+
+    pub fn tokens(tokens: i64) -> Self {
+        Self::Tokens(tokens)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum AgentMcpServer {
+    Name(String),
+    Inline(IndexMap<String, McpServerConfig>),
+}
+
+impl AgentMcpServer {
+    pub fn name(name: impl Into<String>) -> Self {
+        Self::Name(name.into())
+    }
+
+    pub fn inline(name: impl Into<String>, config: McpServerConfig) -> Self {
+        Self::Inline(IndexMap::from([(name.into(), config)]))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
     pub description: String,
@@ -93,7 +138,7 @@ pub struct AgentDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
     #[serde(rename = "mcpServers", skip_serializing_if = "Option::is_none")]
-    pub mcp_servers: Option<Vec<Value>>,
+    pub mcp_servers: Option<Vec<AgentMcpServer>>,
     #[serde(rename = "initialPrompt", skip_serializing_if = "Option::is_none")]
     pub initial_prompt: Option<String>,
     #[serde(rename = "maxTurns", skip_serializing_if = "Option::is_none")]
@@ -101,7 +146,7 @@ pub struct AgentDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub background: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub effort: Option<Value>,
+    pub effort: Option<AgentEffort>,
     #[serde(rename = "permissionMode", skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<PermissionMode>,
 }
@@ -209,6 +254,56 @@ impl PermissionUpdate {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(transparent)]
+pub struct ToolInput {
+    raw: Value,
+}
+
+impl ToolInput {
+    pub fn new(input: impl Serialize) -> crate::Result<Self> {
+        Ok(Self {
+            raw: serde_json::to_value(input)?,
+        })
+    }
+
+    pub(crate) fn from_value(raw: Value) -> Self {
+        Self { raw }
+    }
+
+    pub fn as_value(&self) -> &Value {
+        &self.raw
+    }
+
+    pub fn into_value(self) -> Value {
+        self.raw
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.raw.get(key)
+    }
+}
+
+impl std::ops::Index<&str> for ToolInput {
+    type Output = Value;
+
+    fn index(&self, index: &str) -> &Self::Output {
+        &self.raw[index]
+    }
+}
+
+impl PartialEq<Value> for ToolInput {
+    fn eq(&self, other: &Value) -> bool {
+        &self.raw == other
+    }
+}
+
+impl PartialEq<ToolInput> for Value {
+    fn eq(&self, other: &ToolInput) -> bool {
+        self == &other.raw
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ToolPermissionContext {
     pub signal: Option<Value>,
@@ -227,7 +322,7 @@ pub struct ToolPermissionContext {
 pub enum PermissionResult {
     Allow {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        updated_input: Option<Value>,
+        updated_input: Option<ToolInput>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         updated_permissions: Option<Vec<PermissionUpdate>>,
     },
@@ -242,7 +337,7 @@ pub enum PermissionResult {
 pub type CanUseTool = Arc<
     dyn Fn(
             String,
-            Value,
+            ToolInput,
             ToolPermissionContext,
         ) -> BoxFutureResult<crate::errors::Result<PermissionResult>>
         + Send
@@ -251,7 +346,11 @@ pub type CanUseTool = Arc<
 
 pub type HookEvent = String;
 pub type HookCallback = Arc<
-    dyn Fn(Value, Option<String>, HookContext) -> BoxFutureResult<crate::errors::Result<Value>>
+    dyn Fn(
+            HookInput,
+            Option<String>,
+            HookContext,
+        ) -> BoxFutureResult<crate::errors::Result<HookJsonOutput>>
         + Send
         + Sync,
 >;
@@ -276,7 +375,7 @@ pub struct PreToolUseHookInput {
     pub base: BaseHookInput,
     pub hook_event_name: String,
     pub tool_name: String,
-    pub tool_input: Value,
+    pub tool_input: ToolInput,
     pub tool_use_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
@@ -290,7 +389,7 @@ pub struct PostToolUseHookInput {
     pub base: BaseHookInput,
     pub hook_event_name: String,
     pub tool_name: String,
-    pub tool_input: Value,
+    pub tool_input: ToolInput,
     pub tool_response: Value,
     pub tool_use_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -305,7 +404,7 @@ pub struct PostToolUseFailureHookInput {
     pub base: BaseHookInput,
     pub hook_event_name: String,
     pub tool_name: String,
-    pub tool_input: Value,
+    pub tool_input: ToolInput,
     pub tool_use_id: String,
     pub error: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -379,7 +478,7 @@ pub struct PermissionRequestHookInput {
     pub base: BaseHookInput,
     pub hook_event_name: String,
     pub tool_name: String,
-    pub tool_input: Value,
+    pub tool_input: ToolInput,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_suggestions: Option<Vec<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -388,7 +487,7 @@ pub struct PermissionRequestHookInput {
     pub agent_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum HookInput {
     PreToolUse(PreToolUseHookInput),
@@ -403,6 +502,56 @@ pub enum HookInput {
     PermissionRequest(PermissionRequestHookInput),
 }
 
+impl<'de> Deserialize<'de> for HookInput {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let event = value
+            .get("hook_event_name")
+            .or_else(|| value.get("hookEventName"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| serde::de::Error::custom("missing hook_event_name"))?;
+
+        match event {
+            "PreToolUse" => serde_json::from_value(value)
+                .map(Self::PreToolUse)
+                .map_err(serde::de::Error::custom),
+            "PostToolUse" => serde_json::from_value(value)
+                .map(Self::PostToolUse)
+                .map_err(serde::de::Error::custom),
+            "PostToolUseFailure" => serde_json::from_value(value)
+                .map(Self::PostToolUseFailure)
+                .map_err(serde::de::Error::custom),
+            "UserPromptSubmit" => serde_json::from_value(value)
+                .map(Self::UserPromptSubmit)
+                .map_err(serde::de::Error::custom),
+            "Stop" => serde_json::from_value(value)
+                .map(Self::Stop)
+                .map_err(serde::de::Error::custom),
+            "SubagentStop" => serde_json::from_value(value)
+                .map(Self::SubagentStop)
+                .map_err(serde::de::Error::custom),
+            "PreCompact" => serde_json::from_value(value)
+                .map(Self::PreCompact)
+                .map_err(serde::de::Error::custom),
+            "Notification" => serde_json::from_value(value)
+                .map(Self::Notification)
+                .map_err(serde::de::Error::custom),
+            "SubagentStart" => serde_json::from_value(value)
+                .map(Self::SubagentStart)
+                .map_err(serde::de::Error::custom),
+            "PermissionRequest" => serde_json::from_value(value)
+                .map(Self::PermissionRequest)
+                .map_err(serde::de::Error::custom),
+            other => Err(serde::de::Error::custom(format!(
+                "unsupported hook_event_name {other}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PreToolUseHookSpecificOutput {
@@ -412,7 +561,7 @@ pub struct PreToolUseHookSpecificOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_decision_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated_input: Option<Value>,
+    pub updated_input: Option<ToolInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_context: Option<String>,
 }
@@ -502,7 +651,7 @@ pub struct AsyncHookJsonOutput {
     pub async_timeout: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncHookJsonOutput {
     #[serde(rename = "continue", default, skip_serializing_if = "Option::is_none")]
@@ -528,6 +677,12 @@ pub enum HookJsonOutput {
     Sync(SyncHookJsonOutput),
 }
 
+impl HookJsonOutput {
+    pub fn empty() -> Self {
+        Self::Sync(SyncHookJsonOutput::default())
+    }
+}
+
 #[derive(Clone)]
 pub struct HookMatcher {
     pub matcher: Option<String>,
@@ -549,7 +704,7 @@ impl std::fmt::Debug for HookMatcher {
 // MCP / settings / sandbox option helpers
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum McpServerConfig {
     #[serde(rename = "stdio")]
@@ -574,8 +729,137 @@ pub enum McpServerConfig {
     },
     #[serde(rename = "sdk")]
     Sdk { name: String },
-    #[serde(untagged)]
-    Raw(Value),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct McpServers {
+    #[serde(flatten)]
+    pub servers: IndexMap<String, McpServerConfig>,
+}
+
+impl McpServers {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, name: impl Into<String>, config: McpServerConfig) {
+        self.servers.insert(name.into(), config);
+    }
+
+    pub fn with_server(mut self, name: impl Into<String>, config: McpServerConfig) -> Self {
+        self.insert(name, config);
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.servers.is_empty()
+    }
+}
+
+impl From<IndexMap<String, McpServerConfig>> for McpServers {
+    fn from(servers: IndexMap<String, McpServerConfig>) -> Self {
+        Self { servers }
+    }
+}
+
+impl From<HashMap<String, McpServerConfig>> for McpServers {
+    fn from(servers: HashMap<String, McpServerConfig>) -> Self {
+        Self {
+            servers: servers.into_iter().collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum McpConfig {
+    Servers(McpServers),
+    Path(String),
+}
+
+impl McpConfig {
+    pub fn servers(servers: impl Into<McpServers>) -> Self {
+        Self::Servers(servers.into())
+    }
+
+    pub fn path(path: impl AsRef<Path>) -> Self {
+        Self::Path(path.as_ref().to_string_lossy().to_string())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Servers(servers) if servers.is_empty())
+    }
+}
+
+impl From<McpServers> for McpConfig {
+    fn from(value: McpServers) -> Self {
+        Self::Servers(value)
+    }
+}
+
+impl From<IndexMap<String, McpServerConfig>> for McpConfig {
+    fn from(value: IndexMap<String, McpServerConfig>) -> Self {
+        Self::Servers(value.into())
+    }
+}
+
+impl From<HashMap<String, McpServerConfig>> for McpConfig {
+    fn from(value: HashMap<String, McpServerConfig>) -> Self {
+        Self::Servers(value.into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutputFormat {
+    JsonSchema(JsonSchemaOutputFormat),
+}
+
+impl OutputFormat {
+    pub fn json_schema(schema: impl Serialize) -> crate::Result<Self> {
+        Ok(Self::JsonSchema(JsonSchemaOutputFormat::new(schema)?))
+    }
+}
+
+impl Serialize for OutputFormat {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::JsonSchema(schema) => {
+                let mut state = serializer.serialize_struct("OutputFormat", 2)?;
+                state.serialize_field("type", "json_schema")?;
+                state.serialize_field("schema", schema.schema())?;
+                state.end()
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonSchemaOutputFormat {
+    schema: Value,
+}
+
+impl JsonSchemaOutputFormat {
+    pub fn new(schema: impl Serialize) -> crate::Result<Self> {
+        Ok(Self {
+            schema: serde_json::to_value(schema)?,
+        })
+    }
+
+    pub fn schema(&self) -> &Value {
+        &self.schema
+    }
+}
+
+impl Serialize for JsonSchemaOutputFormat {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.schema.serialize(serializer)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -658,7 +942,7 @@ pub struct ClaudeAgentOptions {
     pub tools: Option<Tools>,
     pub allowed_tools: Vec<String>,
     pub system_prompt: Option<SystemPrompt>,
-    pub mcp_servers: Option<Value>,
+    pub mcp_servers: Option<McpConfig>,
     pub sdk_mcp_servers: HashMap<String, Arc<SdkMcpServer>>,
     pub strict_mcp_config: bool,
     pub permission_mode: Option<PermissionMode>,
@@ -694,7 +978,7 @@ pub struct ClaudeAgentOptions {
     pub max_thinking_tokens: Option<i64>,
     pub thinking: Option<ThinkingConfig>,
     pub effort: Option<String>,
-    pub output_format: Option<Value>,
+    pub output_format: Option<OutputFormat>,
     pub enable_file_checkpointing: bool,
     pub session_store: Option<Arc<dyn SessionStore>>,
     pub session_store_flush: SessionStoreFlushMode,
@@ -708,7 +992,7 @@ impl Default for ClaudeAgentOptions {
             tools: None,
             allowed_tools: Vec::new(),
             system_prompt: None,
-            mcp_servers: Some(Value::Object(JsonMap::new())),
+            mcp_servers: Some(McpConfig::servers(McpServers::new())),
             sdk_mcp_servers: HashMap::new(),
             strict_mcp_config: false,
             permission_mode: None,
@@ -812,6 +1096,65 @@ pub enum Skills {
 pub enum SessionStoreFlushMode {
     Batched,
     Eager,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InputUserMessage {
+    pub role: String,
+    pub content: String,
+}
+
+impl InputUserMessage {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: "user".to_string(),
+            content: content.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum InputMessage {
+    #[serde(rename = "user")]
+    User {
+        message: InputUserMessage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_tool_use_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+}
+
+impl InputMessage {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::User {
+            message: InputUserMessage::user(content),
+            parent_tool_use_id: None,
+            session_id: None,
+        }
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.set_session_id(session_id);
+        self
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::User { session_id, .. } => session_id.as_deref(),
+        }
+    }
+
+    pub fn set_session_id(&mut self, session_id: impl Into<String>) {
+        match self {
+            Self::User {
+                session_id: target, ..
+            } => {
+                *target = Some(session_id.into());
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

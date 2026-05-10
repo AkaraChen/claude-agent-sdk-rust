@@ -15,8 +15,8 @@ use crate::internal::task_compat::{TaskHandle, spawn_detached};
 use crate::mcp::SdkMcpServer;
 use crate::transport::Transport;
 use crate::types::{
-    CanUseTool, HookContext, HookMatcher, PermissionMode, PermissionResult, SessionKey, Skills,
-    ToolPermissionContext,
+    CanUseTool, HookContext, HookInput, HookMatcher, InputMessage, PermissionMode,
+    PermissionResult, SessionKey, Skills, ToolPermissionContext,
 };
 
 use super::transcript_mirror_batcher::TranscriptMirrorBatcher;
@@ -383,7 +383,12 @@ impl Query {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let response = callback(tool_name, original_input.clone(), context).await?;
+                let response = callback(
+                    tool_name,
+                    crate::types::ToolInput::from_value(original_input.clone()),
+                    context,
+                )
+                .await?;
                 match response {
                     PermissionResult::Allow {
                         updated_input,
@@ -393,7 +398,9 @@ impl Query {
                         obj.insert("behavior".to_string(), Value::String("allow".to_string()));
                         obj.insert(
                             "updatedInput".to_string(),
-                            updated_input.unwrap_or(original_input),
+                            updated_input
+                                .map(crate::types::ToolInput::into_value)
+                                .unwrap_or(original_input),
                         );
                         if let Some(updated_permissions) = updated_permissions {
                             obj.insert(
@@ -434,13 +441,16 @@ impl Query {
                             "No hook callback found for ID: {callback_id}"
                         ))
                     })?;
-                let output = callback(
+                let input = serde_json::from_value::<HookInput>(
                     request_data.get("input").cloned().unwrap_or(Value::Null),
+                )?;
+                let output = callback(
+                    input,
                     opt_str(request_data, "tool_use_id"),
                     HookContext { signal: None },
                 )
                 .await?;
-                Ok(convert_hook_output_for_cli(output))
+                Ok(convert_hook_output_for_cli(serde_json::to_value(output)?))
             }
             "mcp_message" => {
                 let server_name = request_data
@@ -602,12 +612,15 @@ impl Query {
         self.transport.end_input().await
     }
 
-    pub async fn stream_input(self: Arc<Self>, mut stream: BoxStream<'static, Value>) {
+    pub async fn stream_input(self: Arc<Self>, mut stream: BoxStream<'static, InputMessage>) {
         while let Some(message) = stream.next().await {
             if self.closed.load(Ordering::SeqCst) {
                 break;
             }
-            let _ = self.transport.write(&(message.to_string() + "\n")).await;
+            let Ok(message) = serde_json::to_string(&message) else {
+                continue;
+            };
+            let _ = self.transport.write(&(message + "\n")).await;
         }
         let _ = self.wait_for_result_and_end_input().await;
     }
@@ -770,7 +783,7 @@ mod tests {
         ));
         query.hook_callbacks.lock().await.insert(
             "hook_0".to_string(),
-            Arc::new(|_, _, _| Box::pin(async { Ok(json!({})) })),
+            Arc::new(|_, _, _| Box::pin(async { Ok(crate::types::HookJsonOutput::empty()) })),
         );
         query.start().await;
         transport.push(json!({
@@ -779,6 +792,13 @@ mod tests {
             "request": {
                 "subtype": "hook_callback",
                 "callback_id": "hook_0",
+                "input": {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "sess",
+                    "transcript_path": "/tmp/transcript.jsonl",
+                    "cwd": "/tmp",
+                    "prompt": "hello",
+                },
             },
         }));
 
@@ -903,7 +923,7 @@ mod tests {
                     let _guard = CancelGuard(cancelled);
                     started.notify_one();
                     futures::future::pending::<()>().await;
-                    Ok(Value::Null)
+                    Ok(crate::types::HookJsonOutput::empty())
                 })
             }),
         );
@@ -914,6 +934,13 @@ mod tests {
             "request": {
                 "subtype": "hook_callback",
                 "callback_id": "hook_0",
+                "input": {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "sess",
+                    "transcript_path": "/tmp/transcript.jsonl",
+                    "cwd": "/tmp",
+                    "prompt": "hello",
+                },
             },
         }));
         started.notified().await;

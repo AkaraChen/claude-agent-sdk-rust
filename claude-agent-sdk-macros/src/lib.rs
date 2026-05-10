@@ -122,7 +122,7 @@ fn expand_sdk_tool(args: ToolArgs, input_fn: ItemFn) -> Result<proc_macro2::Toke
         #input_fn
 
         #factory_vis fn #tool_fn() -> ::claude_agent_sdk::SdkMcpTool {
-            ::claude_agent_sdk::tool::<#arg_ty, _, _>(
+            ::claude_agent_sdk::tool::<#arg_ty, _, _, _>(
                 #name,
                 #description,
                 #fn_name,

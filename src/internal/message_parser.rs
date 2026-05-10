@@ -1,3 +1,4 @@
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::errors::{MessageParseError, Result};
@@ -8,7 +9,8 @@ use crate::types::{
     UserMessageContent,
 };
 
-pub fn parse_message(data: Value) -> Result<Option<Message>> {
+pub fn parse_message(data: impl Serialize) -> Result<Option<Message>> {
+    let data = serde_json::to_value(data)?;
     let Value::Object(obj) = &data else {
         return Err(MessageParseError::new(
             format!(

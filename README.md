@@ -182,17 +182,15 @@ Add the usual serialization dependencies for typed tool arguments:
 [dependencies]
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 ```
 
 ```rust
 use claude_agent_sdk::{
-    create_sdk_mcp_server, tool, ClaudeAgentOptions, ClaudeSdkClient, Prompt,
+    create_sdk_mcp_server, tool, ClaudeAgentOptions, ClaudeSdkClient, Prompt, SdkMcpToolResult,
 };
 use futures::StreamExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 struct GreetArgs {
@@ -201,15 +199,11 @@ struct GreetArgs {
 
 #[tokio::main]
 async fn main() -> claude_agent_sdk::Result<()> {
-    let greet = tool::<GreetArgs, _, _>(
+    let greet = tool::<GreetArgs, _, _, _>(
         "greet",
         "Greet a user",
         |args| async move {
-            Ok(json!({
-                "content": [
-                    {"type": "text", "text": format!("Hello, {}!", args.name)}
-                ]
-            }))
+            Ok(SdkMcpToolResult::text(format!("Hello, {}!", args.name)))
         },
         None,
     );
@@ -236,10 +230,9 @@ async fn main() -> claude_agent_sdk::Result<()> {
 You can also define SDK tools with the `#[sdk_tool]` macro:
 
 ```rust
-use claude_agent_sdk::{create_sdk_mcp_server, sdk_tool};
+use claude_agent_sdk::{create_sdk_mcp_server, sdk_tool, SdkMcpToolResult};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 struct GreetArgs {
@@ -247,10 +240,8 @@ struct GreetArgs {
 }
 
 #[sdk_tool(name = "greet_user", description = "Greets a user by name")]
-async fn greet(args: GreetArgs) -> claude_agent_sdk::Result<Value> {
-    Ok(json!({
-        "content": [{"type": "text", "text": format!("Hello, {}!", args.name)}]
-    }))
+async fn greet(args: GreetArgs) -> claude_agent_sdk::Result<SdkMcpToolResult> {
+    Ok(SdkMcpToolResult::text(format!("Hello, {}!", args.name)))
 }
 
 let server = create_sdk_mcp_server("attribute-tools", "1.0.0", vec![greet_tool()]);
@@ -261,17 +252,17 @@ let server = create_sdk_mcp_server("attribute-tools", "1.0.0", vec![greet_tool()
 You can combine SDK MCP servers and external MCP servers:
 
 ```rust
-use claude_agent_sdk::ClaudeAgentOptions;
-use serde_json::json;
+use claude_agent_sdk::{ClaudeAgentOptions, McpConfig, McpServerConfig, McpServers};
 
 let options = ClaudeAgentOptions {
-    mcp_servers: Some(json!({
-        "external": {
-            "type": "stdio",
-            "command": "external-server",
-            "args": ["--flag"]
-        }
-    })),
+    mcp_servers: Some(McpConfig::servers(McpServers::new().with_server(
+        "external",
+        McpServerConfig::Stdio {
+            command: "external-server".into(),
+            args: vec!["--flag".into()],
+            env: Default::default(),
+        },
+    ))),
     ..Default::default()
 };
 ```
@@ -285,22 +276,39 @@ additional context, or permission decisions.
 ```rust
 use std::{collections::HashMap, sync::Arc};
 
-use claude_agent_sdk::{ClaudeAgentOptions, HookCallback, HookMatcher};
-use serde_json::json;
+use claude_agent_sdk::{
+    ClaudeAgentOptions, HookCallback, HookJsonOutput, HookMatcher, HookSpecificOutput,
+    PreToolUseHookSpecificOutput, SyncHookJsonOutput,
+};
 
 let check_bash: HookCallback = Arc::new(|input, _tool_use_id, _context| {
     Box::pin(async move {
-        let command = input["tool_input"]["command"].as_str().unwrap_or("");
+        let claude_agent_sdk::HookInput::PreToolUse(input) = input else {
+            return Ok(HookJsonOutput::empty());
+        };
+        let command = input.tool_input["command"].as_str().unwrap_or("");
         if command.contains("foo.sh") {
-            return Ok(json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": "Command contains invalid pattern: foo.sh"
-                }
+            return Ok(HookJsonOutput::Sync(SyncHookJsonOutput {
+                continue_: None,
+                suppress_output: None,
+                stop_reason: None,
+                decision: None,
+                system_message: None,
+                reason: None,
+                hook_specific_output: Some(HookSpecificOutput::PreToolUse(
+                    PreToolUseHookSpecificOutput {
+                        hook_event_name: "PreToolUse".into(),
+                        permission_decision: Some("deny".into()),
+                        permission_decision_reason: Some(
+                            "Command contains invalid pattern: foo.sh".into(),
+                        ),
+                        updated_input: None,
+                        additional_context: None,
+                    },
+                )),
             }));
         }
-        Ok(json!({}))
+        Ok(HookJsonOutput::empty())
     })
 });
 
@@ -331,10 +339,9 @@ mode because the callback is served over the SDK control channel.
 use std::sync::Arc;
 
 use claude_agent_sdk::{
-    CanUseTool, ClaudeAgentOptions, PermissionResult, Prompt,
+    CanUseTool, ClaudeAgentOptions, InputMessage, PermissionResult, Prompt,
 };
 use futures::{stream, StreamExt};
-use serde_json::json;
 
 let can_use_tool: CanUseTool = Arc::new(|tool_name, input, _context| {
     Box::pin(async move {
@@ -353,11 +360,7 @@ let can_use_tool: CanUseTool = Arc::new(|tool_name, input, _context| {
     })
 });
 
-let prompt = stream::iter(vec![json!({
-    "type": "user",
-    "message": {"role": "user", "content": "List files in this repo"}
-})])
-.boxed();
+let prompt = stream::iter(vec![InputMessage::user("List files in this repo")]).boxed();
 
 let options = ClaudeAgentOptions {
     can_use_tool: Some(can_use_tool),

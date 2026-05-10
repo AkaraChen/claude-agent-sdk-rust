@@ -1,14 +1,14 @@
 use claude_agent_sdk::{
-    AgentDefinition, AssistantMessage, BaseHookInput, ClaudeAgentOptions, ContentBlock,
-    ContextUsageResponse, HookJsonOutput, HookSpecificOutput, McpServerConnectionStatus,
-    McpServerStatus, McpStatusResponse, NotificationHookInput, NotificationHookSpecificOutput,
-    PermissionBehavior, PermissionMode, PermissionRequestHookInput,
-    PermissionRequestHookSpecificOutput, PermissionRuleValue, PermissionUpdate,
-    PermissionUpdateDestination, PostToolUseHookSpecificOutput, PreToolUseHookInput,
-    PreToolUseHookSpecificOutput, RateLimitInfo, ResultMessage, ServerToolResultBlock,
-    ServerToolUseBlock, SessionStoreFlushMode, SubagentStartHookInput,
-    SubagentStartHookSpecificOutput, SyncHookJsonOutput, TextBlock, ThinkingBlock, ToolResultBlock,
-    ToolUseBlock, UserMessage, UserMessageContent,
+    AgentDefinition, AgentEffort, AgentMcpServer, AssistantMessage, BaseHookInput,
+    ClaudeAgentOptions, ContentBlock, ContextUsageResponse, EffortLevel, HookJsonOutput,
+    HookSpecificOutput, McpServerConfig, McpServerConnectionStatus, McpServerStatus,
+    McpStatusResponse, NotificationHookInput, NotificationHookSpecificOutput, PermissionBehavior,
+    PermissionMode, PermissionRequestHookInput, PermissionRequestHookSpecificOutput,
+    PermissionRuleValue, PermissionUpdate, PermissionUpdateDestination,
+    PostToolUseHookSpecificOutput, PreToolUseHookInput, PreToolUseHookSpecificOutput,
+    RateLimitInfo, ResultMessage, ServerToolResultBlock, ServerToolUseBlock, SessionStoreFlushMode,
+    SubagentStartHookInput, SubagentStartHookSpecificOutput, SyncHookJsonOutput, TextBlock,
+    ThinkingBlock, ToolInput, ToolResultBlock, ToolUseBlock, UserMessage, UserMessageContent,
 };
 use serde_json::json;
 
@@ -302,15 +302,22 @@ fn agent_definition_serializes_with_cli_keys_and_omits_none() {
     agent_def.skills = Some(vec!["skill-a".to_string(), "skill-b".to_string()]);
     agent_def.memory = Some("project".to_string());
     agent_def.mcp_servers = Some(vec![
-        json!("slack"),
-        json!({"local": {"command": "python", "args": ["server.py"]}}),
+        AgentMcpServer::name("slack"),
+        AgentMcpServer::inline(
+            "local",
+            McpServerConfig::Stdio {
+                command: "python".to_string(),
+                args: vec!["server.py".to_string()],
+                env: Default::default(),
+            },
+        ),
     ]);
     agent_def.disallowed_tools = Some(vec!["Bash".to_string(), "Write".to_string()]);
     agent_def.max_turns = Some(10);
     agent_def.initial_prompt = Some("/review-pr 123".to_string());
     agent_def.model = Some("claude-opus-4-5".to_string());
     agent_def.background = Some(true);
-    agent_def.effort = Some(json!("xhigh"));
+    agent_def.effort = Some(AgentEffort::level(EffortLevel::Xhigh));
     agent_def.permission_mode = Some(PermissionMode::BypassPermissions);
 
     let payload = serde_json::to_value(agent_def).unwrap();
@@ -328,7 +335,7 @@ fn agent_definition_serializes_with_cli_keys_and_omits_none() {
     assert_eq!(payload["permissionMode"], json!("bypassPermissions"));
 
     let mut int_effort_agent = agent();
-    int_effort_agent.effort = Some(json!(32000));
+    int_effort_agent.effort = Some(AgentEffort::tokens(32000));
     let payload = serde_json::to_value(int_effort_agent).unwrap();
     assert_eq!(payload["effort"], json!(32000));
 }
@@ -480,7 +487,7 @@ fn hook_input_types_match_python_typed_dict_shapes() {
         base: base.clone(),
         hook_event_name: "PreToolUse".to_string(),
         tool_name: "Bash".to_string(),
-        tool_input: json!({"command": "echo hello"}),
+        tool_input: ToolInput::new(json!({"command": "echo hello"})).unwrap(),
         tool_use_id: "toolu_abc123".to_string(),
         agent_id: Some("agent-42".to_string()),
         agent_type: Some("researcher".to_string()),
@@ -493,7 +500,7 @@ fn hook_input_types_match_python_typed_dict_shapes() {
         base,
         hook_event_name: "PermissionRequest".to_string(),
         tool_name: "Bash".to_string(),
-        tool_input: json!({"command": "ls"}),
+        tool_input: ToolInput::new(json!({"command": "ls"})).unwrap(),
         permission_suggestions: Some(vec![json!({"type": "allow", "rule": "Bash(*)"})]),
         agent_id: None,
         agent_type: None,
@@ -533,7 +540,7 @@ fn hook_output_types_serialize_cli_field_names() {
         hook_event_name: "PreToolUse".to_string(),
         permission_decision: Some("ask".to_string()),
         permission_decision_reason: Some("needs review".to_string()),
-        updated_input: Some(json!({"command": "pwd"})),
+        updated_input: Some(ToolInput::new(json!({"command": "pwd"})).unwrap()),
         additional_context: Some("context for claude".to_string()),
     };
     let payload = serde_json::to_value(pre_tool).unwrap();

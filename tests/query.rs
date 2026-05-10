@@ -5,8 +5,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use claude_agent_sdk::internal::query::Query;
 use claude_agent_sdk::{
-    CanUseTool, ClaudeAgentOptions, ContentBlock, HookMatcher, Message, Prompt, Result,
-    SdkMcpServer, Skills, Transport, create_sdk_mcp_server, query,
+    CanUseTool, ClaudeAgentOptions, ContentBlock, HookMatcher, InputMessage, Message, Prompt,
+    Result, SdkMcpServer, Skills, Transport, create_sdk_mcp_server, query,
 };
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
@@ -494,11 +494,7 @@ async fn stream_prompt_keeps_control_protocol_alive_until_result() {
     let server = create_sdk_mcp_server("greeter", "1.0.0", vec![]);
     let transport =
         MockTransport::with_control_requests(assistant_and_result(), mcp_control_requests());
-    let prompt = stream::iter(vec![json!({
-        "type": "user",
-        "message": {"role": "user", "content": "Greet Alice"},
-    })])
-    .boxed();
+    let prompt = stream::iter(vec![InputMessage::user("Greet Alice")]).boxed();
     let mut stream = query(
         Prompt::Stream(prompt),
         Some(options_with_server(server)),

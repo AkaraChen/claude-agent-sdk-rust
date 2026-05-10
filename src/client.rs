@@ -189,15 +189,12 @@ impl ClaudeSdkClient {
             }
             Prompt::Stream(mut stream) => {
                 while let Some(mut msg) = stream.next().await {
-                    if msg.get("session_id").is_none() {
-                        if let Some(obj) = msg.as_object_mut() {
-                            obj.insert(
-                                "session_id".to_string(),
-                                Value::String(session_id.to_string()),
-                            );
-                        }
+                    if msg.session_id().is_none() {
+                        msg.set_session_id(session_id);
                     }
-                    transport.write(&(msg.to_string() + "\n")).await?;
+                    transport
+                        .write(&(serde_json::to_string(&msg)? + "\n"))
+                        .await?;
                 }
                 Ok(())
             }

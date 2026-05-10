@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use claude_agent_sdk::{
-    CanUseTool, ClaudeAgentOptions, ClaudeSdkClient, ContentBlock, McpServerConnectionStatus,
-    Message, PermissionMode, Prompt, Result, Transport,
+    CanUseTool, ClaudeAgentOptions, ClaudeSdkClient, ContentBlock, InputMessage,
+    McpServerConnectionStatus, Message, PermissionMode, Prompt, Result, Transport,
 };
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
@@ -230,15 +230,8 @@ async fn connect_with_stream_prompt_writes_messages_and_ends_input() {
     let transport = MockTransport::new();
     let mut client = ClaudeSdkClient::new(None, Some(Arc::new(transport.clone())));
     let prompt = stream::iter(vec![
-        json!({
-            "type": "user",
-            "message": {"role": "user", "content": "Hi"},
-        }),
-        json!({
-            "type": "user",
-            "message": {"role": "user", "content": "Bye"},
-            "session_id": "existing-session",
-        }),
+        InputMessage::user("Hi"),
+        InputMessage::user("Bye").with_session_id("existing-session"),
     ])
     .boxed();
 
@@ -605,15 +598,8 @@ async fn stream_send_query_adds_missing_session_id_preserves_existing_and_does_n
     let mut client = ClaudeSdkClient::new(None, Some(Arc::new(transport.clone())));
     client.connect(None).await.unwrap();
     let prompt = stream::iter(vec![
-        json!({
-            "type": "user",
-            "message": {"role": "user", "content": "streamed"},
-        }),
-        json!({
-            "type": "user",
-            "message": {"role": "user", "content": "already scoped"},
-            "session_id": "existing-session",
-        }),
+        InputMessage::user("streamed"),
+        InputMessage::user("already scoped").with_session_id("existing-session"),
     ])
     .boxed();
     client

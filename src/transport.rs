@@ -24,7 +24,8 @@ use crate::errors::{
     ClaudeSdkError, CliConnectionError, CliJsonDecodeError, CliNotFoundError, ProcessError, Result,
 };
 use crate::types::{
-    ClaudeAgentOptions, SdkPluginConfig, Skills, SystemPrompt, ThinkingConfig, Tools,
+    ClaudeAgentOptions, McpConfig, OutputFormat, SdkPluginConfig, Skills, SystemPrompt,
+    ThinkingConfig, Tools,
 };
 
 const DEFAULT_MAX_BUFFER_SIZE: usize = 1024 * 1024;
@@ -306,28 +307,26 @@ impl SubprocessCliTransport {
         }
         if !sdk_server_configs.is_empty() {
             let mut servers = match &options.mcp_servers {
-                Some(Value::Object(obj)) => obj.clone(),
+                Some(McpConfig::Servers(servers)) => match serde_json::to_value(servers)? {
+                    Value::Object(obj) => obj,
+                    _ => serde_json::Map::new(),
+                },
                 _ => serde_json::Map::new(),
             };
             servers.extend(sdk_server_configs);
             cmd.push("--mcp-config".to_string());
             cmd.push(python_json_dumps(&json!({ "mcpServers": servers })));
         } else if let Some(mcp_servers) = &options.mcp_servers {
-            if mcp_servers.is_null() {
-                // no-op
-            } else if let Value::Object(obj) = mcp_servers {
-                if !obj.is_empty() {
+            match mcp_servers {
+                McpConfig::Servers(servers) if !servers.is_empty() => {
                     cmd.push("--mcp-config".to_string());
-                    cmd.push(python_json_dumps(&json!({ "mcpServers": obj })));
+                    cmd.push(python_json_dumps(&json!({ "mcpServers": servers })));
                 }
-            } else if let Value::String(path_or_json) = mcp_servers {
-                if !path_or_json.is_empty() {
+                McpConfig::Path(path) if !path.is_empty() => {
                     cmd.push("--mcp-config".to_string());
-                    cmd.push(path_or_json.clone());
+                    cmd.push(path.clone());
                 }
-            } else {
-                cmd.push("--mcp-config".to_string());
-                cmd.push(python_json_dumps(mcp_servers));
+                _ => {}
             }
         }
         if options.include_partial_messages {
@@ -396,11 +395,11 @@ impl SubprocessCliTransport {
             cmd.push("--effort".to_string());
             cmd.push(effort.clone());
         }
-        if let Some(Value::Object(output_format)) = &options.output_format {
-            if output_format.get("type").and_then(Value::as_str) == Some("json_schema") {
-                if let Some(schema) = output_format.get("schema") {
+        if let Some(output_format) = &options.output_format {
+            match output_format {
+                OutputFormat::JsonSchema(schema) => {
                     cmd.push("--json-schema".to_string());
-                    cmd.push(python_json_dumps(schema));
+                    cmd.push(python_json_dumps(schema.schema()));
                 }
             }
         }
@@ -928,8 +927,9 @@ mod tests {
     use crate::internal::session_store::InMemorySessionStore;
     use crate::mcp::create_sdk_mcp_server;
     use crate::types::{
-        PermissionMode, SandboxIgnoreViolations, SandboxNetworkConfig, SandboxSettings,
-        SessionStoreFlushMode, TaskBudget,
+        McpConfig, McpServerConfig, McpServers, OutputFormat, PermissionMode,
+        SandboxIgnoreViolations, SandboxNetworkConfig, SandboxSettings, SessionStoreFlushMode,
+        TaskBudget,
     };
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1289,13 +1289,14 @@ mod tests {
     #[tokio::test]
     async fn build_command_mcp_plugins_output_format_and_agents_stay_off_cli() {
         let mut opts = options();
-        opts.mcp_servers = Some(json!({
-            "test-server": {
-                "type": "stdio",
-                "command": "/path/to/server",
-                "args": ["--option", "value"],
-            }
-        }));
+        opts.mcp_servers = Some(McpConfig::servers(McpServers::new().with_server(
+            "test-server",
+            McpServerConfig::Stdio {
+                command: "/path/to/server".to_string(),
+                args: vec!["--option".to_string(), "value".to_string()],
+                env: Default::default(),
+            },
+        )));
         let cmd = command_for(opts).await;
         assert_eq!(
             value_after(&cmd, "--mcp-config"),
@@ -1308,15 +1309,15 @@ mod tests {
         );
 
         let mut opts = options();
-        opts.mcp_servers = Some(json!("/path/to/mcp-config.json"));
+        opts.mcp_servers = Some(McpConfig::path("/path/to/mcp-config.json"));
         assert_eq!(
             value_after(&command_for(opts).await, "--mcp-config"),
             "/path/to/mcp-config.json"
         );
 
         let mut opts = options();
-        let mcp_json = r#"{"mcpServers":{"json-server":{"type":"stdio","command":"node"}}}"#;
-        opts.mcp_servers = Some(Value::String(mcp_json.to_string()));
+        let mcp_json = "/path/to/generated-mcp-config.json";
+        opts.mcp_servers = Some(McpConfig::path(mcp_json));
         assert_eq!(
             value_after(&command_for(opts).await, "--mcp-config"),
             mcp_json
@@ -1333,10 +1334,13 @@ mod tests {
         opts.plugins = vec![SdkPluginConfig::Local {
             path: "/plugins/a".to_string(),
         }];
-        opts.output_format = Some(json!({
-            "type": "json_schema",
-            "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
-        }));
+        opts.output_format = Some(
+            OutputFormat::json_schema(json!({
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+            }))
+            .unwrap(),
+        );
         opts.agents = Some(HashMap::from([(
             "test-agent".to_string(),
             crate::types::AgentDefinition {

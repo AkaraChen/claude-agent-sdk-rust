@@ -32,7 +32,10 @@ pub use internal::sessions::{
     get_session_messages_from_store, get_subagent_messages, get_subagent_messages_from_store,
     list_sessions, list_sessions_from_store, list_subagents, list_subagents_from_store,
 };
-pub use mcp::{SdkMcpServer, SdkMcpTool, SdkMcpToolHandler, create_sdk_mcp_server, tool};
+pub use mcp::{
+    SdkMcpContent, SdkMcpServer, SdkMcpTool, SdkMcpToolHandler, SdkMcpToolResult,
+    create_sdk_mcp_server, tool,
+};
 pub use query::{Prompt, query};
 pub use rmcp::model::ToolAnnotations;
 pub use rmcp::{tool as rmcp_tool, tool_handler, tool_router};

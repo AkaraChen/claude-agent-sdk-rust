@@ -4,10 +4,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-use claude_agent_sdk::{ClaudeAgentOptions, Message, Prompt, query};
+use claude_agent_sdk::{ClaudeAgentOptions, InputMessage, Message, Prompt, query};
 use futures::StreamExt;
 use futures::stream;
-use serde_json::json;
 
 #[tokio::test]
 async fn query_with_stream_prompt_writes_all_messages_to_subprocess_stdin() {
@@ -72,8 +71,8 @@ print(json.dumps({
     std::fs::set_permissions(&script, perms).unwrap();
 
     let prompt = stream::iter(vec![
-        json!({"type": "user", "message": {"role": "user", "content": "First"}}),
-        json!({"type": "user", "message": {"role": "user", "content": "Second"}}),
+        InputMessage::user("First"),
+        InputMessage::user("Second"),
     ])
     .boxed();
 

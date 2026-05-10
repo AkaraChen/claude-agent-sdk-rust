@@ -5,9 +5,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use claude_agent_sdk::internal::query::Query;
 use claude_agent_sdk::{
-    CanUseTool, ClaudeAgentOptions, ClaudeSdkError, HookCallback, HookMatcher, PermissionBehavior,
-    PermissionResult, PermissionRuleValue, PermissionUpdate, PermissionUpdateDestination, Result,
-    ToolPermissionContext, Transport,
+    CanUseTool, ClaudeAgentOptions, ClaudeSdkError, HookCallback, HookInput, HookJsonOutput,
+    HookMatcher, HookSpecificOutput, NotificationHookSpecificOutput, PermissionBehavior,
+    PermissionRequestHookSpecificOutput, PermissionResult, PermissionRuleValue, PermissionUpdate,
+    PermissionUpdateDestination, PostToolUseHookSpecificOutput, PreToolUseHookSpecificOutput,
+    Result, SubagentStartHookSpecificOutput, SyncHookJsonOutput, ToolInput, ToolPermissionContext,
+    Transport,
 };
 use futures::stream::{self, BoxStream};
 use serde_json::{Value, json};
@@ -164,7 +167,10 @@ async fn permission_callback_allow_deny_and_updates_are_serialized() {
                     })
                 }
                 "ModifyTool" => Ok(PermissionResult::Allow {
-                    updated_input: Some(json!({"file_path": "/tmp/file", "safe_mode": true})),
+                    updated_input: Some(
+                        ToolInput::new(json!({"file_path": "/tmp/file", "safe_mode": true}))
+                            .unwrap(),
+                    ),
                     updated_permissions: None,
                 }),
                 "DenyTool" => Ok(PermissionResult::Deny {
@@ -321,23 +327,27 @@ async fn hook_callbacks_are_registered_and_outputs_are_converted() {
     let transport = MockTransport::new();
     let hook: HookCallback = Arc::new(|input, tool_use_id, _context| {
         Box::pin(async move {
-            assert_eq!(input["test"], "data");
+            let HookInput::PreToolUse(input) = input else {
+                panic!("expected PreToolUse hook input");
+            };
+            assert_eq!(input.tool_input["test"], "data");
             assert_eq!(tool_use_id.as_deref(), Some("tool-456"));
-            Ok(json!({
-                "async_": true,
-                "asyncTimeout": 5000,
-                "continue_": false,
-                "suppressOutput": false,
-                "stopReason": "Testing field conversion",
-                "systemMessage": "Fields should be converted",
-                "decision": "block",
-                "reason": "Test reason for blocking",
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": "Security policy violation",
-                    "updatedInput": {"modified": "input"},
-                },
+            Ok(HookJsonOutput::Sync(SyncHookJsonOutput {
+                continue_: Some(false),
+                suppress_output: Some(false),
+                stop_reason: Some("Testing field conversion".to_string()),
+                decision: Some("block".to_string()),
+                system_message: Some("Fields should be converted".to_string()),
+                reason: Some("Test reason for blocking".to_string()),
+                hook_specific_output: Some(HookSpecificOutput::PreToolUse(
+                    PreToolUseHookSpecificOutput {
+                        hook_event_name: "PreToolUse".to_string(),
+                        permission_decision: Some("deny".to_string()),
+                        permission_decision_reason: Some("Security policy violation".to_string()),
+                        updated_input: Some(ToolInput::new(json!({"modified": "input"})).unwrap()),
+                        additional_context: None,
+                    },
+                )),
             }))
         })
     });
@@ -377,22 +387,27 @@ async fn hook_callbacks_are_registered_and_outputs_are_converted() {
     assert_eq!(init["request"]["hooks"]["PreToolUse"][0]["timeout"], 2.5);
 
     transport.push(json!({
-        "type": "control_request",
-        "request_id": "hook-1",
+    "type": "control_request",
+    "request_id": "hook-1",
         "request": {
             "subtype": "hook_callback",
             "callback_id": hook_id,
-            "input": {"test": "data"},
+            "input": {
+                "hook_event_name": "PreToolUse",
+                "session_id": "sess-1",
+                "transcript_path": "/tmp/t",
+                "cwd": "/home",
+                "tool_name": "TestTool",
+                "tool_input": {"test": "data"},
+                "tool_use_id": "tool-456",
+            },
             "tool_use_id": "tool-456",
         },
     }));
     let response = transport.wait_for_control_response("hook-1").await;
     let result = &response["response"]["response"];
-    assert_eq!(result["async"], true);
-    assert!(result.get("async_").is_none());
     assert_eq!(result["continue"], false);
     assert!(result.get("continue_").is_none());
-    assert_eq!(result["asyncTimeout"], 5000);
     assert_eq!(result["suppressOutput"], false);
     assert_eq!(result["stopReason"], "Testing field conversion");
     assert_eq!(result["systemMessage"], "Fields should be converted");
@@ -410,41 +425,45 @@ async fn new_hook_event_shapes_round_trip_through_control_callback() {
     let transport = MockTransport::new();
     let hook: HookCallback = Arc::new(|input, _tool_use_id, _context| {
         Box::pin(async move {
-            let event = input["hook_event_name"].as_str().unwrap();
-            let output = match event {
-                "Notification" => json!({
-                    "hookSpecificOutput": {
-                        "hookEventName": "Notification",
-                        "additionalContext": "Notification processed",
-                    },
-                }),
-                "PermissionRequest" => json!({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PermissionRequest",
-                        "decision": {"type": "allow"},
-                    },
-                }),
-                "SubagentStart" => json!({
-                    "hookSpecificOutput": {
-                        "hookEventName": "SubagentStart",
-                        "additionalContext": "Subagent approved",
-                    },
-                }),
-                "PostToolUse" => json!({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PostToolUse",
-                        "updatedMCPToolOutput": {"result": "modified output"},
-                    },
-                }),
-                _ => json!({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "allow",
-                        "additionalContext": "Extra context for Claude",
-                    },
+            let hook_specific_output = match input {
+                HookInput::Notification(_) => {
+                    HookSpecificOutput::Notification(NotificationHookSpecificOutput {
+                        hook_event_name: "Notification".to_string(),
+                        additional_context: Some("Notification processed".to_string()),
+                    })
+                }
+                HookInput::PermissionRequest(_) => {
+                    HookSpecificOutput::PermissionRequest(PermissionRequestHookSpecificOutput {
+                        hook_event_name: "PermissionRequest".to_string(),
+                        decision: json!({"type": "allow"}),
+                    })
+                }
+                HookInput::SubagentStart(_) => {
+                    HookSpecificOutput::SubagentStart(SubagentStartHookSpecificOutput {
+                        hook_event_name: "SubagentStart".to_string(),
+                        additional_context: Some("Subagent approved".to_string()),
+                    })
+                }
+                HookInput::PostToolUse(_) => {
+                    HookSpecificOutput::PostToolUse(PostToolUseHookSpecificOutput {
+                        hook_event_name: "PostToolUse".to_string(),
+                        additional_context: None,
+                        updated_tool_output: None,
+                        updated_mcp_tool_output: Some(json!({"result": "modified output"})),
+                    })
+                }
+                _ => HookSpecificOutput::PreToolUse(PreToolUseHookSpecificOutput {
+                    hook_event_name: "PreToolUse".to_string(),
+                    permission_decision: Some("allow".to_string()),
+                    permission_decision_reason: None,
+                    updated_input: None,
+                    additional_context: Some("Extra context for Claude".to_string()),
                 }),
             };
-            Ok(output)
+            Ok(HookJsonOutput::Sync(SyncHookJsonOutput {
+                hook_specific_output: Some(hook_specific_output),
+                ..Default::default()
+            }))
         })
     });
     let mut hooks = std::collections::HashMap::new();
@@ -514,18 +533,58 @@ async fn new_hook_event_shapes_round_trip_through_control_callback() {
             .unwrap()
             .to_string();
         let request_id = format!("event-{index}");
+        let input = match event {
+            "Notification" => json!({
+                "hook_event_name": event,
+                "session_id": "sess-1",
+                "transcript_path": "/tmp/t",
+                "cwd": "/home",
+                "message": "done",
+                "notification_type": "info",
+            }),
+            "PermissionRequest" => json!({
+                "hook_event_name": event,
+                "session_id": "sess-1",
+                "transcript_path": "/tmp/t",
+                "cwd": "/home",
+                "tool_name": "Bash",
+                "tool_input": {"command": "pwd"},
+            }),
+            "SubagentStart" => json!({
+                "hook_event_name": event,
+                "session_id": "sess-1",
+                "transcript_path": "/tmp/t",
+                "cwd": "/home",
+                "agent_id": "agent-1",
+                "agent_type": "coder",
+            }),
+            "PostToolUse" => json!({
+                "hook_event_name": event,
+                "session_id": "sess-1",
+                "transcript_path": "/tmp/t",
+                "cwd": "/home",
+                "tool_name": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_response": {"stdout": "/home"},
+                "tool_use_id": "tool-1",
+            }),
+            _ => json!({
+                "hook_event_name": event,
+                "session_id": "sess-1",
+                "transcript_path": "/tmp/t",
+                "cwd": "/home",
+                "tool_name": "Bash",
+                "tool_input": {"command": "pwd"},
+                "tool_use_id": "tool-1",
+            }),
+        };
         transport.push(json!({
             "type": "control_request",
             "request_id": request_id,
             "request": {
                 "subtype": "hook_callback",
                 "callback_id": hook_id,
-                "input": {
-                    "hook_event_name": event,
-                    "session_id": "sess-1",
-                    "transcript_path": "/tmp/t",
-                    "cwd": "/home",
-                },
+                "input": input,
                 "tool_use_id": Value::Null,
             },
         }));

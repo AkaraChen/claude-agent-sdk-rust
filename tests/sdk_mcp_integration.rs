@@ -49,7 +49,7 @@ async fn call_tool(server: &claude_agent_sdk::SdkMcpServer, name: &str, argument
 async fn sdk_mcp_server_lists_and_calls_registered_tools() {
     let executions = Arc::new(Mutex::new(Vec::<Value>::new()));
     let executions_for_greet = executions.clone();
-    let greet = tool::<GreetArgs, _, _>(
+    let greet = tool::<GreetArgs, _, _, _>(
         "greet_user",
         "Greets a user by name",
         move |args| {
@@ -68,7 +68,7 @@ async fn sdk_mcp_server_lists_and_calls_registered_tools() {
         None,
     );
     let executions_for_add = executions.clone();
-    let add = tool::<AddArgs, _, _>(
+    let add = tool::<AddArgs, _, _, _>(
         "add_numbers",
         "Adds two numbers",
         move |args| {
@@ -127,21 +127,23 @@ async fn sdk_mcp_server_lists_and_calls_registered_tools() {
 
 #[tokio::test]
 async fn sdk_mcp_tool_direct_handler_and_server_error_result_semantics() {
-    let echo = tool::<GreetArgs, _, _>(
+    let echo = tool::<GreetArgs, _, _, _>(
         "echo",
         "Echo input",
         |args| async move { Ok(json!({"output": args.name})) },
         None,
     );
-    assert_eq!(echo.name, "echo");
-    assert_eq!(echo.description, "Echo input");
-    let direct = (echo.handler)(json!({"name": "test"})).await.unwrap();
+    assert_eq!(echo.name(), "echo");
+    assert_eq!(echo.description(), "Echo input");
+    let direct = echo.call_raw(json!({"name": "test"})).await.unwrap();
     assert_eq!(direct, json!({"output": "test"}));
 
-    let fail = tool::<EmptyArgs, _, _>(
+    let fail = tool::<EmptyArgs, _, _, _>(
         "fail",
         "Always fails",
-        |_args| async move { Err(ClaudeSdkError::Runtime("Expected error".to_string())) },
+        |_args| async move {
+            Err::<serde_json::Value, _>(ClaudeSdkError::Runtime("Expected error".to_string()))
+        },
         None,
     );
     let server = create_sdk_mcp_server("error-test", "1.0.0", vec![fail]);
@@ -163,7 +165,7 @@ async fn sdk_mcp_tool_direct_handler_and_server_error_result_semantics() {
             .contains("Tool 'missing' not found")
     );
 
-    let invalid = tool::<EmptyArgs, _, _>(
+    let invalid = tool::<EmptyArgs, _, _, _>(
         "invalid",
         "Returns a non-object result",
         |_args| async move { Ok(json!("not an object")) },
@@ -216,7 +218,7 @@ async fn initialized_notification_response_matches_python_bridge_shape() {
 #[tokio::test]
 async fn is_error_images_resources_and_unknown_content_are_converted_like_python() {
     let png_data = "iVBORw0KGgo=".to_string();
-    let mixed = tool::<EmptyArgs, _, _>(
+    let mixed = tool::<EmptyArgs, _, _, _>(
         "mixed",
         "Returns mixed content",
         move |_args| {
@@ -272,7 +274,7 @@ async fn is_error_images_resources_and_unknown_content_are_converted_like_python
 
 #[tokio::test]
 async fn structured_content_is_not_forwarded_by_python_bridge() {
-    let structured = tool::<EmptyArgs, _, _>(
+    let structured = tool::<EmptyArgs, _, _, _>(
         "structured",
         "Returns structured content",
         |_args| async move {
@@ -294,26 +296,26 @@ async fn structured_content_is_not_forwarded_by_python_bridge() {
 
 #[tokio::test]
 async fn annotations_and_large_result_meta_flow_through_tools_list() {
-    let read_only = tool::<GreetArgs, _, _>(
+    let read_only = tool::<GreetArgs, _, _, _>(
         "read_data",
         "Read data from source",
         |args| async move { Ok(text_result(format!("Data from {}", args.name))) },
         Some(ToolAnnotations::new().read_only(true).open_world(false)),
     );
-    let destructive = tool::<GreetArgs, _, _>(
+    let destructive = tool::<GreetArgs, _, _, _>(
         "delete_item",
         "Delete an item",
         |args| async move { Ok(text_result(format!("Deleted {}", args.name))) },
         Some(ToolAnnotations::new().destructive(true).idempotent(true)),
     );
-    let large: SdkMcpTool = tool::<EmptyArgs, _, _>(
+    let large: SdkMcpTool = tool::<EmptyArgs, _, _, _>(
         "get_large_schema",
         "Returns a large DB schema that may exceed 50K chars.",
         |_args| async move { Ok(text_result("schema")) },
         None,
     )
     .with_max_result_size_chars(500_000);
-    let plain = tool::<EmptyArgs, _, _>(
+    let plain = tool::<EmptyArgs, _, _, _>(
         "plain_tool",
         "A tool without annotations",
         |_args| async move { Ok(text_result("ok")) },
@@ -403,7 +405,7 @@ async fn raw_tool_escape_hatch_can_passthrough_custom_json_schema() {
 
 #[tokio::test]
 async fn derived_json_schema_covers_lists_and_optional_fields() {
-    let search = tool::<SearchArgs, _, _>(
+    let search = tool::<SearchArgs, _, _, _>(
         "search",
         "Search for tagged items",
         |args| async move {

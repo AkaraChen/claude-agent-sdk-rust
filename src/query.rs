@@ -1,15 +1,14 @@
 use futures::stream::BoxStream;
-use serde_json::Value;
 
 use crate::Result;
 use crate::internal::client::InternalClient;
 use crate::transport::Transport;
-use crate::types::{ClaudeAgentOptions, Message};
+use crate::types::{ClaudeAgentOptions, InputMessage, Message};
 use std::sync::Arc;
 
 pub enum Prompt {
     Text(String),
-    Stream(BoxStream<'static, Value>),
+    Stream(BoxStream<'static, InputMessage>),
 }
 
 impl From<String> for Prompt {

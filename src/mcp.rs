@@ -6,21 +6,71 @@ use futures::FutureExt;
 use rmcp::model::{CallToolResult, Content, JsonObject, Meta, Tool, ToolAnnotations};
 use rmcp::schemars::{JsonSchema, schema_for};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::errors::{ClaudeSdkError, Result};
-use crate::types::BoxFutureResult;
+use crate::types::{BoxFutureResult, ToolInput};
 
-pub type SdkMcpToolHandler = Arc<dyn Fn(Value) -> BoxFutureResult<Result<Value>> + Send + Sync>;
+pub type SdkMcpToolHandler = Arc<dyn Fn(ToolInput) -> BoxFutureResult<Result<Value>> + Send + Sync>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SdkMcpToolResult {
+    pub content: Vec<SdkMcpContent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_error: Option<bool>,
+}
+
+impl SdkMcpToolResult {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![SdkMcpContent::text(text)],
+            is_error: None,
+        }
+    }
+
+    pub fn error_text(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![SdkMcpContent::text(text)],
+            is_error: Some(true),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SdkMcpContent {
+    Text {
+        text: String,
+    },
+    Image {
+        data: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+    },
+    ResourceLink {
+        name: String,
+        uri: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+}
+
+impl SdkMcpContent {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+}
 
 #[derive(Clone)]
 pub struct SdkMcpTool {
-    pub name: String,
-    pub description: String,
-    pub input_schema: Value,
-    pub handler: SdkMcpToolHandler,
-    pub annotations: Option<ToolAnnotations>,
-    pub max_result_size_chars: Option<i64>,
+    name: String,
+    description: String,
+    input_schema: Value,
+    handler: SdkMcpToolHandler,
+    annotations: Option<ToolAnnotations>,
+    max_result_size_chars: Option<i64>,
 }
 
 impl std::fmt::Debug for SdkMcpTool {
@@ -39,10 +89,16 @@ impl SdkMcpTool {
     pub fn new_raw(
         name: impl Into<String>,
         description: impl Into<String>,
-        input_schema: Value,
+        input_schema: impl Serialize,
         handler: SdkMcpToolHandler,
         annotations: Option<ToolAnnotations>,
     ) -> Self {
+        let input_schema = serde_json::to_value(input_schema).unwrap_or_else(|_| {
+            json!({
+                "type": "object",
+                "properties": {}
+            })
+        });
         Self {
             name: name.into(),
             description: description.into(),
@@ -56,6 +112,18 @@ impl SdkMcpTool {
     pub fn with_max_result_size_chars(mut self, max_result_size_chars: i64) -> Self {
         self.max_result_size_chars = Some(max_result_size_chars);
         self
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub fn input_schema(&self) -> &Value {
+        &self.input_schema
     }
 
     pub fn rmcp_tool(&self) -> Tool {
@@ -77,9 +145,14 @@ impl SdkMcpTool {
         tool
     }
 
-    pub async fn call(&self, arguments: Value) -> Result<Value> {
-        let result = (self.handler)(arguments).await?;
+    pub async fn call(&self, arguments: impl Serialize) -> Result<Value> {
+        let result = self.call_raw(arguments).await?;
         Ok(normalize_tool_result(result)?)
+    }
+
+    pub async fn call_raw(&self, arguments: impl Serialize) -> Result<Value> {
+        let arguments = ToolInput::new(arguments)?;
+        (self.handler)(arguments).await
     }
 }
 
@@ -116,7 +189,17 @@ impl SdkMcpServer {
         })
     }
 
-    pub async fn handle_json_rpc(&self, message: Value) -> Value {
+    pub async fn handle_json_rpc(&self, message: impl Serialize) -> Value {
+        let message = match serde_json::to_value(message) {
+            Ok(message) => message,
+            Err(error) => {
+                return json!({
+                    "jsonrpc": "2.0",
+                    "id": Value::Null,
+                    "error": {"code": -32600, "message": error.to_string()},
+                });
+            }
+        };
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         let method = message.get("method").and_then(Value::as_str).unwrap_or("");
         if method == "notifications/initialized" {
@@ -195,7 +278,7 @@ pub fn create_sdk_mcp_server(
     Arc::new(SdkMcpServer::new(name, version, tools))
 }
 
-pub fn tool<T, F, Fut>(
+pub fn tool<T, R, F, Fut>(
     name: impl Into<String>,
     description: impl Into<String>,
     handler: F,
@@ -204,7 +287,8 @@ pub fn tool<T, F, Fut>(
 where
     T: DeserializeOwned + JsonSchema + Send + 'static,
     F: Fn(T) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<Value>> + Send + 'static,
+    Fut: Future<Output = Result<R>> + Send + 'static,
+    R: Serialize,
 {
     let schema = serde_json::to_value(schema_for!(T)).unwrap_or_else(|_| {
         json!({
@@ -213,11 +297,12 @@ where
         })
     });
     let handler = Arc::new(handler);
-    let wrapped: SdkMcpToolHandler = Arc::new(move |arguments: Value| {
+    let wrapped: SdkMcpToolHandler = Arc::new(move |arguments: ToolInput| {
         let handler = handler.clone();
         async move {
-            let args: T = serde_json::from_value(arguments)?;
-            handler(args).await
+            let args: T = serde_json::from_value(arguments.into_value())?;
+            let result = handler(args).await?;
+            Ok(serde_json::to_value(result)?)
         }
         .boxed()
     });
@@ -339,7 +424,7 @@ mod tests {
 
     #[tokio::test]
     async fn sdk_mcp_server_lists_and_calls_tools() {
-        let add = tool::<AddArgs, _, _>(
+        let add = tool::<AddArgs, _, _, _>(
             "add",
             "Add two numbers",
             |args| async move {
